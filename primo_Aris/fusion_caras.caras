@@ -1,4 +1,7 @@
 # Archivo de caras generado por reconstruccion DCEL
 Nombre               Interno                        Externo        
 -----------------------------------------------------------------
-Cara_Infinita        [s11_p]                        None           
+C1                   [f1_p,j1_p,m1_p]               None           
+CARA2                None                           f2_p           
+CARA3                None                           j2_p           
+CARA4                None                           m2_p           

@@ -40,24 +40,25 @@ class Vertice:
         return f"V({self.nombre}: {self.x}, {self.y})"
 
 class Arista:
-    def __init__(self, nombre, origen_id, pareja_id, cara_id, sigue_id, antes_id):
+    def __init__(self, nombre, origen_id, pareja_id, cara_id, sigue_id, antes_id, layer_id=None):
         self.nombre = nombre
         self.origen_id = origen_id
         self.pareja_id = pareja_id
         self.cara_id = cara_id
         self.sigue_id = sigue_id
         self.antes_id = antes_id
+        self.layer_id = layer_id
         self.origen = None
         self.pareja = None
         self.sigue = None
         self.cycle_type = None # Atributo para clasificar si es parte de un ciclo externo o interno
 
 class Cara:
-    def __init__(self, nombre, interno_raw, externo_id):
+    def __init__(self, nombre, interno_raw, externo_id, activa=True):
         self.nombre = nombre
         self.interno_ids = interno_raw.strip("[]").split(",") if interno_raw != "None" else []
         self.externo_id = externo_id
-        self.activa = True
+        self.activa = activa
 
 class Figura:
     def __init__(self, id_layer):
@@ -118,9 +119,7 @@ def cargar_datos(carpeta):
         if os.path.exists(path_v):
             with open(path_v, 'r') as f:
                 for line in f:
-                    print("linea: ",line)
-                    print("va a entrar: ",(line.startswith('#') or ('Nombre' in line or 'Archivo' in line)))
-                    if line.startswith('#') or ('Nombre'in line or 'Archivo' in line): continue
+                    if line.startswith('#') or 'Nombre' in line or 'Archivo' in line: continue
                     parts = line.split()
                     
                     fig.vertices[parts[0]] = Vertice(parts[0], parts[1], parts[2])
@@ -131,7 +130,7 @@ def cargar_datos(carpeta):
                 for line in f:
                     if line.startswith('#') or 'Nombre' in line or 'Archivo' in line : continue
                     p = line.split()
-                    fig.aristas[p[0]] = Arista(p[0], p[1], p[2], p[3], p[4], p[5])
+                    fig.aristas[p[0]] = Arista(p[0], p[1], p[2], p[3], p[4], p[5], layer_id=ly)
 
         path_c = os.path.join(carpeta, f"{ly}.caras")
         if os.path.exists(path_c):
@@ -182,8 +181,8 @@ def find_intersection(p1, p2, p3, p4):
         return ua, ub, (x1 + ua*(x2-x1), y1 + ua*(y2-y1))
     return None, None, None
 
-def reconstruir_caras_dcel(vertices_dict, aristas_dict):
-    # Vincular objetos para navegación geométrica
+def reconstruir_caras_dcel(vertices_dict, aristas_dict, original_activity=None):
+    if original_activity is None: original_activity = {}
     for a in aristas_dict.values():
         if a.origen_id in vertices_dict:
             a.origen = vertices_dict[a.origen_id]
@@ -229,15 +228,38 @@ def reconstruir_caras_dcel(vertices_dict, aristas_dict):
         if info['area'] > 0: caras_potenciales.append(info)
         else: huecos.append(info)
 
-    # 3. Nombramiento y Grafo de caras (c1, c2, c3...)
+    # 3. Nombramiento y Grafo de caras (C1, C2, C3...)
     face_counter = 1
-    inf_face_name = f"c{face_counter}"
+    inf_face_name = f"C{face_counter}"
     face_counter += 1
+    used_names = {inf_face_name}
 
-    # Asignar nombres finales a caras potenciales antes de procesar huecos
+    # Asignar nombres finales y determinar actividad
     for cp in caras_potenciales:
-        cp['final_name'] = f"c{face_counter}"
-        face_counter += 1
+        # Identificar orígenes (capa, cara) originales involucrados
+        orig_sources = {(a.layer_id, a.cara_id) for a in cp['aristas'] if a.cara_id and a.cara_id != "None"}
+        unique_face_ids = {s[1] for s in orig_sources}
+        
+        # Lógica de Naming: Preservar si el ID de cara es único entre sus componentes, de lo contrario Cx
+        if len(unique_face_ids) == 1:
+            cand_name = list(unique_face_ids)[0]
+            if cand_name not in used_names:
+                cp['final_name'] = cand_name
+            else:
+                cp['final_name'] = f"{cand_name}_{face_counter}"
+                face_counter += 1
+        else:
+            cp['final_name'] = f"C{face_counter}"
+            face_counter += 1
+        used_names.add(cp['final_name'])
+
+        # Lógica de Actividad: Solo activa si TODAS las contribuciones originales eran activas.
+        # Se usa la tupla (layer_id, cara_id) para consultar el estado real de la capa original.
+        cp['activa'] = True
+        for src in orig_sources:
+            if not original_activity.get(src, True):
+                cp['activa'] = False
+                break
 
     for h in huecos:
         p_h = h['p_min']
@@ -267,14 +289,14 @@ def reconstruir_caras_dcel(vertices_dict, aristas_dict):
     # 4. Reregistro de caras y generación de listas de ligas internas
     caras_finales = {}
     
-    # Registrar cara 1 (Infinita/Exterior)
+    # Registrar cara Infinita
     inf_holes = [h['ref_id'] for h in huecos if h['parent'] == inf_face_name]
-    caras_finales[inf_face_name] = Cara(inf_face_name, f"[{','.join(inf_holes)}]" if inf_holes else "None", "None")
+    caras_finales[inf_face_name] = Cara(inf_face_name, f"[{','.join(inf_holes)}]" if inf_holes else "None", "None", activa=True)
 
     for cp in caras_potenciales:
         c_name = cp['final_name']
         c_holes = [h['ref_id'] for h in huecos if h['parent'] == c_name]
-        caras_finales[c_name] = Cara(c_name, f"[{','.join(c_holes)}]" if c_holes else "None", cp['ref_id'])
+        caras_finales[c_name] = Cara(c_name, f"[{','.join(c_holes)}]" if c_holes else "None", cp['ref_id'], activa=cp['activa'])
         # 5. Actualizar cada arista con su cara y tipo de ciclo
         for a in cp['aristas']:
             aristas_dict[a.nombre].cara_id = c_name
@@ -359,9 +381,9 @@ def ejecutar_primo_primos(figuras):
                 rev_idx = len(pts) - i - 2
                 n_bw = f"{a_twin_orig.nombre}_p" if rev_idx == 0 else f"{a_twin_orig.nombre}_pp{rev_idx}"
                 
-                he_fw = Arista(n_fw, u_v.nombre, n_bw, "None", "None", "None")
+                he_fw = Arista(n_fw, u_v.nombre, n_bw, a_orig.cara_id, "None", "None", layer_id=a_orig.layer_id)
                 he_fw.origen = u_v
-                he_bw = Arista(n_bw, v_v.nombre, n_fw, "None", "None", "None")
+                he_bw = Arista(n_bw, v_v.nombre, n_fw, a_twin_orig.cara_id, "None", "None", layer_id=a_twin_orig.layer_id)
                 he_bw.origen = v_v
                 final_aristas[n_fw] = he_fw
                 final_aristas[n_bw] = he_bw
@@ -393,7 +415,13 @@ def ejecutar_primo_primos(figuras):
         if he.pareja_id in final_aristas: he.pareja = final_aristas[he.pareja_id]
         if he.sigue_id in final_aristas: he.sigue = final_aristas[he.sigue_id]
     
-    caras_fusion = reconstruir_caras_dcel(final_vertices, final_aristas)
+    # Recopilar mapa de actividad original
+    original_activity = {}
+    for fig in figuras.values():
+        for c in fig.caras.values():
+            original_activity[(fig.id_layer, c.nombre)] = c.activa
+
+    caras_fusion = reconstruir_caras_dcel(final_vertices, final_aristas, original_activity)
     return final_vertices, final_aristas, caras_fusion
 
 def guardar_resultado_fusion(aristas, filename):
@@ -443,11 +471,11 @@ def guardar_vertices_fusion(vertices, aristas, filename):
 def dibujar_ciclos_dcel(ax, vertices, aristas, caras):
     """Dibuja el resultado de la fusión con flechas desplazadas (offset) para no encimarse."""
     # Generar colores aleatorios para las caras
-    face_colors = {c_id: [random.random() for _ in range(3)] for c_id in caras}
+    face_colors = {c_id: [random.random() for _ in range(3)] for c_id, obj in caras.items() if obj.activa}
     
     # Dibujar el relleno de las caras primero (alpha para transparencia)
     for c_id, cara_obj in caras.items():
-        if cara_obj.externo_id and cara_obj.externo_id != "None":
+        if cara_obj.activa and cara_obj.externo_id and cara_obj.externo_id != "None":
             start_edge = aristas.get(cara_obj.externo_id)
             if start_edge:
                 poly_pts = []
@@ -465,9 +493,9 @@ def dibujar_ciclos_dcel(ax, vertices, aristas, caras):
     all_y = [v.y for v in vertices.values()]
     if all_x and all_y:
         max_span = max(max(all_x) - min(all_x), max(all_y) - min(all_y))
-        global_offset = max_span * 0.025  # 2.5% del tamaño total
+        global_offset = max_span * 0.01  # Offset incrementado para separar flechas opuestas
     else:
-        global_offset = 0.2
+        global_offset = 0.1
 
     for a in aristas.values():
         if not (a.origen and a.sigue and a.sigue.origen): continue
@@ -481,18 +509,23 @@ def dibujar_ciclos_dcel(ax, vertices, aristas, caras):
         ux, uy = dx/dist, dy/dist
         nx, ny = -uy, ux  # Normal hacia la izquierda del vector (p1->p2)
 
-        # Ajuste fino: si la arista es muy pequeña, limitamos el offset para que no "vuele" lejos
-        current_offset = min(global_offset, dist * 0.3)
+        # Ajuste fino de offset
+        current_offset = min(global_offset, dist * 0.4)
+
+        # Determinar si la cara de la arista está activa para el color
+        cara_obj = caras.get(a.cara_id)
+        is_active = cara_obj.activa if cara_obj else True
+        alpha_val = 1.0 if is_active else 0.3
 
         # Determinar color y lado del offset
-        if a.cycle_type == 'external':
+        if a.cycle_type == 'external' and is_active:
             color = "blue"
             ox, oy = nx * current_offset, ny * current_offset # Izquierda (Interior cara)
-        elif a.cycle_type == 'internal':
+        elif a.cycle_type == 'internal' and is_active:
             color = "red"
             ox, oy = -nx * current_offset, -ny * current_offset # Derecha (Interior hueco)
         else:
-            color = "black"
+            color = "gray"
             ox, oy = 0, 0
 
         # Puntos con desplazamiento
@@ -504,19 +537,19 @@ def dibujar_ciclos_dcel(ax, vertices, aristas, caras):
 
         # Dibujar la flecha del ciclo con offset
         ax.annotate("", xy=p2_off, xytext=p1_off,
-                    arrowprops=dict(arrowstyle="->", color=color, mutation_scale=10, lw=1.3))
+                    arrowprops=dict(arrowstyle="->", color=color, mutation_scale=10, lw=1.3, alpha=alpha_val))
         
         # Texto de la arista con un ligero ajuste para centrarlo respecto a la flecha
         ax.text(p1_off[0] + (p2_off[0]-p1_off[0])/2 + ox*0.3, 
                 p1_off[1] + (p2_off[1]-p1_off[1])/2 + oy*0.3, 
-                a.nombre, fontsize=7, color=color, fontweight='bold',
-                ha='center', va='center')
+                a.nombre, fontsize=7, color=color, alpha=alpha_val,
+                fontweight='bold', ha='center', va='center')
 
     for v in vertices.values():
         ax.plot(v.x, v.y, 'ko', markersize=3)
         ax.text(v.x+0.1, v.y+0.1, v.nombre, fontsize=8, fontweight='bold')
 
-ruta_carpeta = "./ejemplo_02"
+ruta_carpeta = "./ejemplo_03"
 figuras = cargar_datos(ruta_carpeta)
 
 if figuras:
@@ -541,8 +574,8 @@ if figuras:
     # Añadir una leyenda para los colores de los ciclos
     from matplotlib.lines import Line2D
     legend_elements = [
-        Line2D([0], [0], color='blue', lw=2, label='Ciclo Externo (Cara)'),
-        Line2D([0], [0], color='red', lw=2, label='Ciclo Interno (Hueco)')
+        Line2D([0], [0], color='blue', lw=2, label='Ciclo Externo '),
+        Line2D([0], [0], color='red', lw=2, label='Ciclo Interno ')
     ]
     ax.legend(handles=legend_elements, loc='upper right')
 
