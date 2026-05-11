@@ -1,0 +1,10 @@
+# Archivo de aristas generado por el algoritmo Primo Primos
+Nombre          Origen     Pareja          Cara       Sigue           Antes          
+s11_p           p1         s12_pp1         Cara_Infinita s21_pp1         s12_pp1        
+s11_pp1         X1         s12_p           Cara_Infinita s12_p           s22_p          
+s12_p           p2         s11_pp1         Cara_Infinita s22_pp1         s11_pp1        
+s12_pp1         X1         s11_p           Cara_Infinita s11_p           s21_p          
+s21_p           p3         s22_pp1         Cara_Infinita s12_pp1         s22_pp1        
+s21_pp1         X1         s22_p           Cara_Infinita s22_p           s11_p          
+s22_p           p4         s21_pp1         Cara_Infinita s11_pp1         s21_pp1        
+s22_pp1         X1         s21_p           Cara_Infinita s21_p           s12_p          
