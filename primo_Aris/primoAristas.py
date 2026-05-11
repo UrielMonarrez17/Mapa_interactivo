@@ -27,6 +27,7 @@ import re
 import matplotlib.cm as cm 
 import numpy as np
 import math
+import random
 
 class Vertice:
     def __init__(self, nombre, x, y):
@@ -49,6 +50,7 @@ class Arista:
         self.origen = None
         self.pareja = None
         self.sigue = None
+        self.cycle_type = None # Atributo para clasificar si es parte de un ciclo externo o interno
 
 class Cara:
     def __init__(self, nombre, interno_raw, externo_id):
@@ -181,15 +183,16 @@ def find_intersection(p1, p2, p3, p4):
     return None, None, None
 
 def reconstruir_caras_dcel(vertices_dict, aristas_dict):
-    """
-    Reconstruccion avanzada de caras siguiendo los pasos solicitados:
-    1. Extraccion de ciclos.
-    2. Clasificacion (Interno/Externo) via orientacion.
-    3. Grafo de contencion.
-    4. Registro de caras y huecos.
-    5. Actualizacion de aristas.
-    """
-    # 1. Extraccion de sitios (ciclos)
+    # Vincular objetos para navegación geométrica
+    for a in aristas_dict.values():
+        if a.origen_id in vertices_dict:
+            a.origen = vertices_dict[a.origen_id]
+        if a.pareja_id in aristas_dict:
+            a.pareja = aristas_dict[a.pareja_id]
+        if a.sigue_id in aristas_dict:
+            a.sigue = aristas_dict[a.sigue_id]
+
+    # 1. Extracción de sitios mediante un recorrido de aristas con ciclos (sigue_id)
     visitadas = set()
     ciclos = []
     for aid in sorted(aristas_dict.keys()):
@@ -197,13 +200,14 @@ def reconstruir_caras_dcel(vertices_dict, aristas_dict):
             ciclo_actual = []
             curr = aid
             while curr not in visitadas:
+                if curr not in aristas_dict: break
                 visitadas.add(curr)
                 ciclo_actual.append(aristas_dict[curr])
                 curr = aristas_dict[curr].sigue_id
-            if ciclo_actual:
-                ciclos.append(ciclo_actual)
+            if ciclo_actual: ciclos.append(ciclo_actual)
 
-    # 2. Clasificar ciclos (Area signada: >0 CCW = Cara, <0 CW = Hueco)
+    # 2. Clasificar si son ciclos externos o internos (Area signada o giro)
+    # Area > 0 -> CCW (Externo/Cara), Area < 0 -> CW (Interno/Hueco)
     caras_potenciales = [] # Ciclos CCW
     huecos = []            # Ciclos CW
 
@@ -211,71 +215,75 @@ def reconstruir_caras_dcel(vertices_dict, aristas_dict):
         area = 0.0
         for i in range(len(c)):
             p1 = c[i].origen
-            p2 = aristas_dict[c[i].sigue_id].origen
+            p2 = c[i].sigue.origen
             area += (p1.x * p2.y) - (p2.x * p1.y)
         
-        # Guardar info del ciclo: (aristas, area, punto_izquierdo)
-        leftmost_idx = min(range(len(c)), key=lambda i: (c[i].origen.x, c[i].origen.y))
+        # Nodo más izquierdo para el paso 3
+        p_izq = min((a.origen for a in c), key=lambda v: (v.x, v.y))
         info = {
             'aristas': c,
             'area': area / 2.0,
-            'p_min': c[leftmost_idx].origen,
-            'externo_id': c[0].nombre
+            'p_min': p_izq,
+            'ref_id': c[0].nombre
         }
-        
-        if info['area'] > 0:
-            caras_potenciales.append(info)
-        else:
-            huecos.append(info)
+        if info['area'] > 0: caras_potenciales.append(info)
+        else: huecos.append(info)
 
-    # 3. Grafo de contencion (Asociar huecos a la cara que los contiene)
-    # Cara infinita por defecto
-    face_map = {"Cara_Infinita": {"externo": "None", "internos": []}}
-    
+    # 3. Nombramiento y Grafo de caras (c1, c2, c3...)
+    face_counter = 1
+    inf_face_name = f"c{face_counter}"
+    face_counter += 1
+
+    # Asignar nombres finales a caras potenciales antes de procesar huecos
+    for cp in caras_potenciales:
+        cp['final_name'] = f"c{face_counter}"
+        face_counter += 1
+
     for h in huecos:
-        contenedor = "Cara_Infinita"
-        min_x_dist = float('inf')
-        
-        # Ray-casting simplificado: buscar la arista a la izquierda mas cercana
+        p_h = h['p_min']
+        parent = inf_face_name
+        max_x_left = float('-inf')
+
         for cp in caras_potenciales:
-            # Verificar si el hueco esta dentro de la cara potencial
-            # (Usando el punto mas a la izquierda del hueco)
-            p = h['p_min']
+            # Point-in-polygon
             inside = False
-            poly = cp['aristas']
-            for i in range(len(poly)):
-                v1 = poly[i].origen
-                v2 = aristas_dict[poly[i].sigue_id].origen
-                if ((v1.y > p.y) != (v2.y > p.y)) and \
-                   (p.x < (v2.x - v1.x) * (p.y - v1.y) / (v2.y - v1.y + 1e-10) + v1.x):
+            for a in cp['aristas']:
+                v1, v2 = a.origen, a.sigue.origen
+                if ((v1.y > p_h.y) != (v2.y > p_h.y)) and \
+                   (p_h.x < (v2.x - v1.x) * (p_h.y - v1.y) / (v2.y - v1.y) + v1.x):
                     inside = not inside
             
             if inside:
-                # Si hay varias, podriamos jerarquizar, aqui tomamos la primera
-                contenedor = cp['externo_id'] + "_face"
-                break
-        
-        h['parent'] = contenedor
+                # Barrido a la izquierda para encontrar la arista más cercana (paso 3)
+                for a in cp['aristas']:
+                    v1, v2 = a.origen, a.sigue.origen
+                    if (v1.y <= p_h.y < v2.y) or (v2.y <= p_h.y < v1.y):
+                        ix = v1.x + (v2.x - v1.x) * (p_h.y - v1.y) / (v2.y - v1.y)
+                        if ix < p_h.x and ix > max_x_left:
+                            max_x_left = ix
+                            parent = cp['final_name']
+        h['parent'] = parent
 
-    # 4. Registro de objetos Cara
+    # 4. Reregistro de caras y generación de listas de ligas internas
     caras_finales = {}
     
-    # Registrar la cara infinita si tiene huecos
-    inf_holes = [h['externo_id'] for h in huecos if h['parent'] == "Cara_Infinita"]
-    caras_finales["Cara_Infinita"] = Cara("Cara_Infinita", f"[{','.join(inf_holes)}]" if inf_holes else "None", "None")
+    # Registrar cara 1 (Infinita/Exterior)
+    inf_holes = [h['ref_id'] for h in huecos if h['parent'] == inf_face_name]
+    caras_finales[inf_face_name] = Cara(inf_face_name, f"[{','.join(inf_holes)}]" if inf_holes else "None", "None")
 
     for cp in caras_potenciales:
-        c_name = cp['externo_id'] + "_face"
-        c_holes = [h['externo_id'] for h in huecos if h['parent'] == c_name]
-        caras_finales[c_name] = Cara(c_name, f"[{','.join(c_holes)}]" if c_holes else "None", cp['externo_id'])
-        
-        # 5. Actualizar aristas con su cara
+        c_name = cp['final_name']
+        c_holes = [h['ref_id'] for h in huecos if h['parent'] == c_name]
+        caras_finales[c_name] = Cara(c_name, f"[{','.join(c_holes)}]" if c_holes else "None", cp['ref_id'])
+        # 5. Actualizar cada arista con su cara y tipo de ciclo
         for a in cp['aristas']:
             aristas_dict[a.nombre].cara_id = c_name
-            
+            aristas_dict[a.nombre].cycle_type = 'external' # Tipo para límites externos
+
     for h in huecos:
         for a in h['aristas']:
             aristas_dict[a.nombre].cara_id = h['parent']
+            aristas_dict[a.nombre].cycle_type = 'internal' # Tipo para límites internos (huecos)
 
     return caras_finales
 
@@ -432,7 +440,83 @@ def guardar_vertices_fusion(vertices, aristas, filename):
             f.write(f"{v.nombre:<12} {v.x:<12.4f} {v.y:<12.4f} {inc:<15}\n")
     print(f"Archivo de vertices guardado en: {filename}")
 
-ruta_carpeta = "./ejemplo_01"
+def dibujar_ciclos_dcel(ax, vertices, aristas, caras):
+    """Dibuja el resultado de la fusión con flechas desplazadas (offset) para no encimarse."""
+    # Generar colores aleatorios para las caras
+    face_colors = {c_id: [random.random() for _ in range(3)] for c_id in caras}
+    
+    # Dibujar el relleno de las caras primero (alpha para transparencia)
+    for c_id, cara_obj in caras.items():
+        if cara_obj.externo_id and cara_obj.externo_id != "None":
+            start_edge = aristas.get(cara_obj.externo_id)
+            if start_edge:
+                poly_pts = []
+                curr = start_edge
+                for _ in range(len(aristas)): # Límite de seguridad
+                    poly_pts.append((curr.origen.x, curr.origen.y))
+                    curr = curr.sigue
+                    if curr == start_edge or curr is None: break
+                if len(poly_pts) > 2:
+                    xs, ys = zip(*poly_pts)
+                    ax.fill(xs, ys, color=face_colors[c_id], alpha=0.3, label=f"Relleno {c_id}")
+    
+    # Calcular la extensión total de los datos para un offset adaptable (2.5% de la pantalla)
+    all_x = [v.x for v in vertices.values()]
+    all_y = [v.y for v in vertices.values()]
+    if all_x and all_y:
+        max_span = max(max(all_x) - min(all_x), max(all_y) - min(all_y))
+        global_offset = max_span * 0.025  # 2.5% del tamaño total
+    else:
+        global_offset = 0.2
+
+    for a in aristas.values():
+        if not (a.origen and a.sigue and a.sigue.origen): continue
+        
+        p1, p2 = a.origen, a.sigue.origen
+        dx, dy = p2.x - p1.x, p2.y - p1.y
+        dist = math.sqrt(dx**2 + dy**2)
+        if dist == 0: continue
+
+        # Vector unitario y normal (izquierda)
+        ux, uy = dx/dist, dy/dist
+        nx, ny = -uy, ux  # Normal hacia la izquierda del vector (p1->p2)
+
+        # Ajuste fino: si la arista es muy pequeña, limitamos el offset para que no "vuele" lejos
+        current_offset = min(global_offset, dist * 0.3)
+
+        # Determinar color y lado del offset
+        if a.cycle_type == 'external':
+            color = "blue"
+            ox, oy = nx * current_offset, ny * current_offset # Izquierda (Interior cara)
+        elif a.cycle_type == 'internal':
+            color = "red"
+            ox, oy = -nx * current_offset, -ny * current_offset # Derecha (Interior hueco)
+        else:
+            color = "black"
+            ox, oy = 0, 0
+
+        # Puntos con desplazamiento
+        p1_off = (p1.x + ox, p1.y + oy)
+        p2_off = (p2.x + ox, p2.y + oy)
+
+        # Dibujar la línea base (el segmento real)
+        ax.plot([p1.x, p2.x], [p1.y, p2.y], color='gray', linestyle='--', alpha=0.3, linewidth=1)
+
+        # Dibujar la flecha del ciclo con offset
+        ax.annotate("", xy=p2_off, xytext=p1_off,
+                    arrowprops=dict(arrowstyle="->", color=color, mutation_scale=10, lw=1.3))
+        
+        # Texto de la arista con un ligero ajuste para centrarlo respecto a la flecha
+        ax.text(p1_off[0] + (p2_off[0]-p1_off[0])/2 + ox*0.3, 
+                p1_off[1] + (p2_off[1]-p1_off[1])/2 + oy*0.3, 
+                a.nombre, fontsize=7, color=color, fontweight='bold',
+                ha='center', va='center')
+
+    for v in vertices.values():
+        ax.plot(v.x, v.y, 'ko', markersize=3)
+        ax.text(v.x+0.1, v.y+0.1, v.nombre, fontsize=8, fontweight='bold')
+
+ruta_carpeta = "./ejemplo_02"
 figuras = cargar_datos(ruta_carpeta)
 
 if figuras:
@@ -440,29 +524,29 @@ if figuras:
     v_fusion, a_fusion, c_fusion = ejecutar_primo_primos(figuras)
     
     # Guardar resultados de la fusion en archivos
+    # La función `reconstruir_caras_dcel` ahora se llama dentro de `ejecutar_primo_primos`
+    # y opera sobre las aristas y vértices resultantes de la fusión.
+    # Los archivos de salida reflejarán esta reconstrucción.
+    
     guardar_resultado_fusion(a_fusion, "fusion_aristas.aristas")
     guardar_vertices_fusion(v_fusion, a_fusion, "fusion_vertices.vertices")
     guardar_caras_fusion(c_fusion, "fusion_caras.caras")
 
     fig_plot, ax = plt.subplots(figsize=(10, 8))
-    
-    # Crear una lista de todas las caras activas para asignar colores unicos
-    caras_totales = []
-    for ly_id, fig_obj in figuras.items():
-        for c_id, cara_obj in fig_obj.caras.items():
-            if cara_obj.activa:
-                caras_totales.append((ly_id, c_id))
-    
-    # Generar paleta de colores basada en el numero de caras
-    n_colores = len(caras_totales) if len(caras_totales) > 0 else 1
-    color_list = cm.tab20(np.linspace(0, 1, n_colores))
-    mapa_colores_global = {key: color_list[i] for i, key in enumerate(caras_totales)}
+    # Graficar el resultado de la fusion resaltando los ciclos
+    dibujar_ciclos_dcel(ax, v_fusion, a_fusion, c_fusion)
+    ax.set_title("Visualización de Ciclos y Caras Fusionadas (Primo Primos)")
+    ax.set_aspect('equal')
 
-    for nombre, figura_obj in figuras.items():
-        figura_obj.dibujar_en_eje(ax, mapa_colores_global)
+    # Añadir una leyenda para los colores de los ciclos
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], color='blue', lw=2, label='Ciclo Externo (Cara)'),
+        Line2D([0], [0], color='red', lw=2, label='Ciclo Interno (Hueco)')
+    ]
+    ax.legend(handles=legend_elements, loc='upper right')
 
     ax.grid(True, linestyle='--', alpha=0.6)
-    ax.legend() 
     plt.show()
 else:
     print("No se encontraron archivos layerXX en la carpeta especificada.")
