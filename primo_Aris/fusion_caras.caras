@@ -1,19 +1,5 @@
 # Archivo de caras generado por reconstruccion DCEL
 Nombre               Interno                        Externo        
 -----------------------------------------------------------------
-C1                   [layer01_s11_pp2,layer03_s22_pp3] None           
-C10                  None                           layer02_s21_pp1
-C11                  None                           layer02_s21_pp4
-C12                  None                           layer02_s21_pp5
-C13                  None                           layer02_s22_p  
-C14                  None                           layer03_s21_pp1
-C15                  None                           layer04_s41_p  
-C2                   None                           layer01_s11_p  
-C3                   None                           layer01_s11_pp1
-C4                   None                           layer01_s11_pp5
-C5                   None                           layer01_s11_pp6
-C6                   None                           layer01_s12_p  
-C7                   None                           layer01_s12_pp4
-C8                   None                           layer01_s12_pp5
-C9                   None                           layer02_s21_p  
-CARA3                None                           layer05_j2_p   
+C1                   [layer01_s11_pp1,layer01_s12_p,layer01_s12_pp4,layer02_s22_pp3,layer03_s22_pp2,layer04_s42_pp2,layer05_j1_p] None           
+C2                   [layer01_s11_pp2,layer01_s11_pp3,layer01_s11_pp4,layer01_s12_pp3,layer02_s21_pp4,layer02_s22_p,layer02_s22_pp1,layer02_s22_pp2] layer01_s11_p  
