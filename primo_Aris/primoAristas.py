@@ -263,6 +263,7 @@ def open_matplotlib_technical_view(dcel):
         ax.annotate(f" {v.id}", (v.x, v.y), color='darkred', fontsize=8, fontweight='bold', zorder=4)
 
     # Dibujar Caras
+    """
     for fc in dcel.faces.values():
         if fc.id != "C1" and fc.outer_component:
             poly = get_cycle_polygon(fc.outer_component)
@@ -270,7 +271,7 @@ def open_matplotlib_technical_view(dcel):
                 cx = sum(p[0] for p in poly) / len(poly)
                 cy = sum(p[1] for p in poly) / len(poly)
                 ax.text(cx, cy, fc.id, color='forestgreen', fontsize=10, fontweight='bold', ha='center', va='center')
-
+    """
     ax.set_aspect('equal', adjustable='datalim')
     plt.title("Vista Técnica: Aristas difuminadas (1 ID) y Ciclos separados", fontsize=11, pad=12, fontweight='bold')
     plt.xlabel("Eje X")
