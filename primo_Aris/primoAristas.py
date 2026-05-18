@@ -2,7 +2,7 @@ import os
 import math
 import heapq
 import pygame
-import numpy as np
+import matplotlib.pyplot as plt
 
 EPS = 1e-5
 
@@ -19,6 +19,7 @@ class Vertex:
 class HalfEdge:
     def __init__(self, eid):
         self.id = eid
+        self.physical_id = None  # ID único visual y de archivo (Ej. e1)
         self.origin = None
         self.twin = None
         self.next = None
@@ -40,7 +41,7 @@ class DCEL:
         self.faces = {}
         self.v_counter = 0
         self.e_counter = 0
-        self.f_counter = 1 # C1 es la cara infinita
+        self.f_counter = 1 
 
     def add_vertex(self, x, y):
         key = (round(x, 4), round(y, 4))
@@ -117,34 +118,9 @@ def parse_layer_files(folder_path, prefix):
                     while True:
                         curr.face = f_obj; curr = curr.next
                         if curr == f_obj.outer_component: break
-                for ic in f_obj.inner_components:
-                    curr = ic
-                    while True:
-                        curr.face = f_obj; curr = curr.next
-                        if curr == ic: break
 
-    a_file = os.path.join(folder_path, f"{prefix}.activos")
-    active_faces = set()
-    if os.path.exists(a_file):
-        with open(a_file, 'r') as f:
-            for line in f:
-                if line.startswith('#') or not line.strip() or "Caras" in line or "Archivo" in line: continue
-                active_faces.add(line.strip())
-    for fid in active_faces:
-        if fid in dcel.faces: dcel.faces[fid].active = True
-
-    for f_obj in dcel.faces.values():
-        if f_obj.outer_component:
-            poly = get_face_polygon(f_obj); area = 0.0; n = len(poly)
-            for i in range(n):
-                x1, y1 = poly[i]; x2, y2 = poly[(i+1)%n]
-                area += (x1 * y2 - x2 * y1)
-            f_obj.area = abs(area / 2.0)
     return dcel
 
-# ========================================================
-# ALGORITMO DE FUSIÓN (MAP OVERLAY)
-# ========================================================
 def extract_segments(dcel):
     segments = []; visited_edges = set()
     for e in dcel.edges.values():
@@ -166,19 +142,226 @@ def intersect(seg1, seg2):
         return (p1[0] + t*(p2[0]-p1[0]), p1[1] + t*(p2[1]-p1[1]))
     return None
 
-def find_intersections(segments):
-    # Optimización: Buscamos todas las intersecciones pareando todos los segmentos.
-    # Esto es robusto y previene los errores de superposición del Sweep-Line clásico.
-    points = set()
-    for s in segments: points.add(s[0]); points.add(s[1])
+# ========================================================
+# GUARDADO DE ARCHIVOS DCEL RESULTANTE
+# ========================================================
+def save_dcel_full(dcel, prefix="overlay_result"):
+    with open(f"{prefix}.vertices", "w") as f:
+        f.write("#################################\n")
+        f.write(f"{'Nombre':<8}{'x':<8}{'y':<8}{'Incidente'}\n")
+        f.write("#################################\n")
+        for v in dcel.vertices.values():
+            inc = v.incident_edge.id if v.incident_edge else "None"
+            f.write(f"{v.id:<8}{v.x:<8g}{v.y:<8g}{inc}\n")
+            
+    with open(f"{prefix}.aristas", "w") as f:
+        f.write("#############################################\n")
+        f.write(f"{'Nombre':<8}{'Origen':<8}{'Pareja':<8}{'Cara':<8}{'Sigue':<8}{'Antes'}\n")
+        f.write("#############################################\n")
+        
+        # AQUÍ ESTÁ LA CORRECCIÓN: 
+        # Se listan TODAS las medias-aristas (Half-Edges) como lo dicta el algoritmo Primo-Primo.
+        # Cada arista apunta a su Pareja (Twin) real, y muestra la Cara que delimita.
+        for e in dcel.edges.values():
+            twin_id = e.twin.id if e.twin else "None"
+            face_id = e.face.id if e.face else "None"
+            nxt_id = e.next.id if e.next else "None"
+            prv_id = e.prev.id if e.prev else "None"
+            
+            f.write(f"{e.id:<8}{e.origin.id:<8}{twin_id:<8}{face_id:<8}{nxt_id:<8}{prv_id}\n")
+            
+    with open(f"{prefix}.caras", "w") as f:
+        f.write("#######################\n")
+        f.write(f"{'Nombre':<8}{'Interno':<15}{'Externo'}\n")
+        f.write("#######################\n")
+        for fc in dcel.faces.values():
+            outer = fc.outer_component.id if fc.outer_component else "None"
+            inner = "[" + ",".join([ic.id for ic in fc.inner_components]) + "]" if fc.inner_components else "None"
+            f.write(f"{fc.id:<8}{inner:<15}{outer}\n")
+            
+    with open(f"{prefix}.activos", "w") as f:
+        f.write("#######################\n")
+        f.write("Caras Activas\n")
+        f.write("#######################\n")
+        for fc in dcel.faces.values():
+            if fc.active: 
+                f.write(f"{fc.id}\n")
+
+# ========================================================
+# UI Y UTILIDADES DE DIBUJO
+# ========================================================
+def draw_skip_button(screen, font):
+    btn_rect = pygame.Rect(screen.get_width() - 160, 10, 150, 30)
+    pygame.draw.rect(screen, (200, 50, 50), btn_rect, border_radius=5)
+    text = font.render("Saltar Animacion", True, (255, 255, 255))
+    screen.blit(text, (btn_rect.x + 10, btn_rect.y + 5))
+    return btn_rect
+
+def setup_pygame_view(segments, width=800, height=600):
+    all_x = [p[0] for s in segments for p in s]
+    all_y = [p[1] for s in segments for p in s]
+    min_x, max_x = min(all_x) - 2, max(all_x) + 2
+    min_y, max_y = min(all_y) - 2, max(all_y) + 2
+    scale = min(width / (max_x - min_x), height / (max_y - min_y)) * 0.9
+    off_x = (width - (max_x - min_x) * scale) / 2
+    off_y = (height - (max_y - min_y) * scale) / 2
+    return min_x, max_x, min_y, max_y, scale, off_x, off_y
+
+def cart_to_screen(cx, cy, min_x, min_y, scale, off_x, off_y, height):
+    return int(off_x + (cx - min_x) * scale), int(height - (off_y + (cy - min_y) * scale))
+
+# ========================================================
+# VISTA TÉCNICA MATPLOTLIB (ARISTA DIFUMINADA Y CICLOS SIN ID)
+# ========================================================
+def open_matplotlib_technical_view(dcel):
+    fig, ax = plt.subplots(figsize=(8, 6))
+    fig.canvas.manager.set_window_title('Map Overlay - Vista Técnica de Ciclos')
+    
+    drawn_physical_edges = set()
+    
+    for e in dcel.edges.values():
+        p1 = (e.origin.x, e.origin.y)
+        p2 = (e.twin.origin.x, e.twin.origin.y)
+        
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        length = math.hypot(dx, dy)
+        
+        # 1. Dibujar la ARISTA FÍSICA difuminada (una sola vez por línea)
+        if e.physical_id not in drawn_physical_edges:
+            ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color='gray', linewidth=5, alpha=0.3, zorder=1)
+            
+            # Etiqueta ÚNICA de la arista en el centro de la línea
+            mx, my = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
+            ax.text(mx, my, e.physical_id, color='black', fontsize=9, fontweight='bold',
+                    ha='center', va='center', bbox=dict(facecolor='white', alpha=0.6, edgecolor='none', pad=1), zorder=4)
+            
+            drawn_physical_edges.add(e.physical_id)
+
+        # 2. Dibujar las FLECHAS direccionales del ciclo SIN ID
+        if length > 0:
+            nx = -dy / length
+            ny = dx / length
+            offset = 0.08  # Separación para las flechas
+            
+            p1_off = (p1[0] + nx * offset, p1[1] + ny * offset)
+            p2_off = (p2[0] + nx * offset, p2[1] + ny * offset)
+            
+            shrink = 0.15 
+            p1_draw = (p1_off[0] + dx * shrink, p1_off[1] + dy * shrink)
+            p2_draw = (p2_off[0] - dx * shrink, p2_off[1] - dy * shrink)
+        else:
+            p1_draw, p2_draw = p1, p2
+
+        # Flecha indicadora (sin colocar texto)
+        ax.annotate("", xy=p2_draw, xytext=p1_draw,
+                    arrowprops=dict(arrowstyle="-|>", color='royalblue', lw=1.2), zorder=2)
+
+    # Dibujar Vértices
+    for v in dcel.vertices.values():
+        ax.plot(v.x, v.y, marker='o', markersize=5, color='crimson', zorder=3)
+        ax.annotate(f" {v.id}", (v.x, v.y), color='darkred', fontsize=8, fontweight='bold', zorder=4)
+
+    # Dibujar Caras
+    for fc in dcel.faces.values():
+        if fc.id != "C1" and fc.outer_component:
+            poly = get_cycle_polygon(fc.outer_component)
+            if poly:
+                cx = sum(p[0] for p in poly) / len(poly)
+                cy = sum(p[1] for p in poly) / len(poly)
+                ax.text(cx, cy, fc.id, color='forestgreen', fontsize=10, fontweight='bold', ha='center', va='center')
+
+    ax.set_aspect('equal', adjustable='datalim')
+    plt.title("Vista Técnica: Aristas difuminadas (1 ID) y Ciclos separados", fontsize=11, pad=12, fontweight='bold')
+    plt.xlabel("Eje X")
+    plt.ylabel("Eje Y")
+    plt.grid(True, linestyle='--', alpha=0.5)
+    
+    plt.savefig("vista_tecnica_dcel.png", dpi=300, bbox_inches='tight')
+    plt.show()  
+
+# ========================================================
+# ANIMACIONES Y SWEEP-LINE
+# ========================================================
+def animated_sweep_line(segments, screen, params):
+    min_x, max_x, min_y, max_y, scale, off_x, off_y = params
+    height = screen.get_height()
+    clock = pygame.time.Clock()
+    font = pygame.font.SysFont("Arial", 18)
+    
+    found_intersections = set()
     for i in range(len(segments)):
         for j in range(i+1, len(segments)):
-            p = intersect(segments[i], segments[j])
-            if p: points.add((round(p[0], 4), round(p[1], 4)))
-    return list(points)
+            pt = intersect(segments[i], segments[j])
+            if pt: found_intersections.add((round(pt[0], 4), round(pt[1], 4)))
+    
+    events = []
+    for i, s in enumerate(segments):
+        p1, p2 = s
+        if p1[0] > p2[0]: p1, p2 = p2, p1
+        heapq.heappush(events, (p1[0], p1[1], 'start', i, p1))
+        heapq.heappush(events, (p2[0], p2[1], 'end', i, p2))
+        
+    for ix, iy in found_intersections:
+        heapq.heappush(events, (ix, iy, 'intersect', -1, (ix, iy)))
+        
+    intersections = []
+    active_segments = set()
+    current_x = min_x
+    running = True; skip_anim = False
 
-def build_overlay_dcel(segments):
-    # 1. Eliminar segmentos duplicados que causan la fusión errónea de caras
+    while events and running:
+        x, y, e_type, idx, pt = heapq.heappop(events)
+        current_x = x
+        
+        if e_type == 'start': active_segments.add(idx)
+        elif e_type == 'end':
+            if idx in active_segments: active_segments.remove(idx)
+        elif e_type == 'intersect':
+            if pt not in intersections: intersections.append(pt)
+
+        if skip_anim: continue
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT: 
+                running = False; pygame.quit(); exit()
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if btn_rect.collidepoint(event.pos): skip_anim = True
+
+        screen.fill((30, 30, 30))
+        for s in segments:
+            p1 = cart_to_screen(s[0][0], s[0][1], min_x, min_y, scale, off_x, off_y, height)
+            p2 = cart_to_screen(s[1][0], s[1][1], min_x, min_y, scale, off_x, off_y, height)
+            pygame.draw.line(screen, (100, 100, 100), p1, p2, 1)
+            
+        for a_idx in active_segments:
+            s = segments[a_idx]
+            p1 = cart_to_screen(s[0][0], s[0][1], min_x, min_y, scale, off_x, off_y, height)
+            p2 = cart_to_screen(s[1][0], s[1][1], min_x, min_y, scale, off_x, off_y, height)
+            pygame.draw.line(screen, (0, 255, 0), p1, p2, 2)
+            
+        for ix, iy in intersections:
+            ip = cart_to_screen(ix, iy, min_x, min_y, scale, off_x, off_y, height)
+            pygame.draw.circle(screen, (255, 0, 0), ip, 4)
+
+        sl_x = cart_to_screen(current_x, 0, min_x, min_y, scale, off_x, off_y, height)[0]
+        pygame.draw.line(screen, (255, 255, 0), (sl_x, 0), (sl_x, height), 2)
+        
+        screen.blit(font.render(f"Fase 1: Sweep-Line Intersecciones ({len(intersections)})", True, (255, 255, 255)), (10, 10))
+        btn_rect = draw_skip_button(screen, font)
+        
+        pygame.display.flip()
+        clock.tick(60)
+        
+    if not skip_anim: pygame.time.delay(500)
+    return list(found_intersections)
+
+def build_and_animate_dcel(segments, inters, screen, params):
+    min_x, max_x, min_y, max_y, scale, off_x, off_y = params
+    height = screen.get_height()
+    clock = pygame.time.Clock()
+    font = pygame.font.SysFont("Arial", 18)
+    
     unique_segments = []
     seen = set()
     for s in segments:
@@ -186,12 +369,8 @@ def build_overlay_dcel(segments):
         key = tuple(sorted([(round(p1[0],4), round(p1[1],4)), (round(p2[0],4), round(p2[1],4))]))
         if key not in seen:
             seen.add(key); unique_segments.append(s)
-    
-    # 2. Encontrar intersecciones y dividir segmentos
-    inters = find_intersections(unique_segments)
-    dcel = DCEL()
+            
     seg_points = {i: [s[0], s[1]] for i, s in enumerate(unique_segments)}
-    
     for ix, iy in inters:
         for i, seg in enumerate(unique_segments):
             p, q = seg
@@ -205,49 +384,110 @@ def build_overlay_dcel(segments):
             p0 = unique_segments[i][0]
             pts.sort(key=lambda p: math.hypot(p[0]-p0[0], p[1]-p0[1]))
 
-    # 3. Construir DCEL
-    edge_map = {}
+    dcel = DCEL()
+    edge_seen = set()
+    
     for i, pts in seg_points.items():
         for j in range(len(pts)-1):
-            v1 = dcel.add_vertex(pts[j][0], pts[j][1]); v2 = dcel.add_vertex(pts[j+1][0], pts[j+1][1])
-            e1, e2 = dcel.add_edge(v1, v2)
-            edge_map[(v1.id, v2.id)] = e1; edge_map[(v2.id, v1.id)] = e2
+            v1 = dcel.add_vertex(pts[j][0], pts[j][1])
+            v2 = dcel.add_vertex(pts[j+1][0], pts[j+1][1])
+            if v1.id != v2.id:
+                k1 = (v1.id, v2.id); k2 = (v2.id, v1.id)
+                if k1 not in edge_seen and k2 not in edge_seen:
+                    dcel.add_edge(v1, v2)
+                    edge_seen.add(k1); edge_seen.add(k2)
 
     adj = {v.id: [] for v in dcel.vertices.values()}
     for e in dcel.edges.values(): adj[e.origin.id].append(e)
 
-    # Regla de la mano izquierda (CCW)
     for v_id, edges in adj.items():
         edges.sort(key=lambda e: math.atan2(e.twin.origin.y - e.origin.y, e.twin.origin.x - e.origin.x))
         for i in range(len(edges)):
             e_curr = edges[i]; e_prev = edges[(i-1) % len(edges)].twin
             e_curr.prev = e_prev; e_prev.next = e_curr
 
-    visited = set(); unbounded = dcel.add_face(is_unbounded=True)
+    visited = set()
+    unbounded = dcel.add_face(is_unbounded=True)
+    holes = []
+    skip_anim = False
+    
     for e in dcel.edges.values():
         if e in visited: continue
         cycle_edges = []; curr = e
         while curr not in visited:
             visited.add(curr); cycle_edges.append(curr); curr = curr.next
+            
+            if skip_anim: continue
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT: pygame.quit(); exit()
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    if btn_rect.collidepoint(event.pos): skip_anim = True
+            
+            screen.fill((30, 30, 30))
+            for de in dcel.edges.values():
+                p1 = cart_to_screen(de.origin.x, de.origin.y, min_x, min_y, scale, off_x, off_y, height)
+                p2 = cart_to_screen(de.twin.origin.x, de.twin.origin.y, min_x, min_y, scale, off_x, off_y, height)
+                color = (0, 255, 255) if de in cycle_edges else (100, 100, 100)
+                width = 3 if de in cycle_edges else 1
+                pygame.draw.line(screen, color, p1, p2, width)
+            
+            screen.blit(font.render("Fase 2: Extrayendo Caras y Agujeros", True, (255, 255, 255)), (10, 10))
+            btn_rect = draw_skip_button(screen, font)
+            pygame.display.flip()
+            clock.tick(30)
+            
         area = 0.0
         for ce in cycle_edges: area += (ce.origin.x * ce.twin.origin.y - ce.twin.origin.x * ce.origin.y)
         area /= 2.0
-        if area < 0:
+        
+        if area < -EPS:
             f = dcel.add_face(); f.outer_component = cycle_edges[0]; f.area = abs(area)
             for ce in cycle_edges: ce.face = f
+        elif area > EPS:
+            holes.append((cycle_edges, area))
+            
+    for hole_edges, hole_area in holes:
+        he = hole_edges[0]
+        v1 = he.origin; v2 = he.twin.origin
+        dx = v2.x - v1.x; dy = v2.y - v1.y
+        length = math.hypot(dx, dy)
+        if length > 0:
+            nx = -dy / length * 0.001
+            ny = dx / length * 0.001
+            test_pt = ((v1.x + v2.x)/2 + nx, (v1.y + v2.y)/2 + ny)
         else:
-            for ce in cycle_edges: ce.face = unbounded
-            if area > EPS: unbounded.inner_components.append(cycle_edges[0])
+            test_pt = (v1.x, v1.y)
+
+        containing_face = unbounded
+        min_area = float('inf')
+        for f in dcel.faces.values():
+            if f.id != unbounded.id and f.outer_component:
+                if f.area > abs(hole_area) + EPS:
+                    if point_in_polygon(test_pt, get_cycle_polygon(f.outer_component)):
+                        if f.area < min_area:
+                            min_area = f.area; containing_face = f
+                        
+        for ce in hole_edges: ce.face = containing_face
+        containing_face.inner_components.append(hole_edges[0])
+            
+    # REASIGNAR IDs FÍSICOS CONSECUTIVOS SIN SALTOS (e1, e2, e3...)
+    c = 1
+    assigned = set()
     for e in dcel.edges.values():
-        if e.face is None: e.face = unbounded
+        if e.id not in assigned:
+            pid = f"e{c}"
+            e.physical_id = pid
+            e.twin.physical_id = pid
+            assigned.add(e.id)
+            assigned.add(e.twin.id)
+            c += 1
+
+    if not skip_anim: pygame.time.delay(500)
     return dcel
 
-# ========================================================
-# PERSISTENCIA Y UTILIDADES
-# ========================================================
-def get_face_polygon(face):
-    if not face.outer_component: return []
-    poly = []; start = face.outer_component; curr = start
+def get_cycle_polygon(edge):
+    if not edge: return []
+    poly = []; start = edge; curr = start
     while True:
         poly.append((curr.origin.x, curr.origin.y)); curr = curr.next
         if curr == start: break
@@ -266,133 +506,148 @@ def point_in_polygon(pt, poly):
         p1x, p1y = p2x, p2y
     return inside
 
-def inherit_attributes(new_dcel, original_dcels):
-    for f in new_dcel.faces.values():
-        if f.id == "C1" or not f.outer_component: continue
-        poly = get_face_polygon(f)
-        cx = sum(p[0] for p in poly) / len(poly); cy = sum(p[1] for p in poly) / len(poly)
-        for orig_dcel in original_dcels:
-            for orig_f in orig_dcel.faces.values():
-                if orig_f.active and orig_f.outer_component:
-                    if point_in_polygon((cx, cy), get_face_polygon(orig_f)):
-                        f.active = True; break
-
-def save_dcel(dcel, prefix="overlay_result"):
-    with open(f"{prefix}.activos", "w") as f:
-        f.write("# Caras Activas\n")
-        for fc in dcel.faces.values():
-            if fc.active: f.write(f"{fc.id}\n")
-
 # ========================================================
-# 3. VISUALIZACIÓN E INTERACTIVIDAD (PYGAME)
+# 3. VISUALIZACIÓN INTERACTIVA PYGAME
 # ========================================================
-def pygame_interactive(dcel, img_folder="imagenes"):
-    pygame.init()
-    WIDTH, HEIGHT = 900, 700
+def pygame_interactive(dcel, initial_params, img_folder="imagenes"):
+    min_x, max_x, min_y, max_y, scale, offset_x, offset_y = initial_params
+    WIDTH, HEIGHT = 800, 600
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("Map Overlay - Primo Primos (Pygame)")
+    pygame.display.set_caption("Map Overlay - Vista Interactiva")
     clock = pygame.time.Clock()
-    font = pygame.font.SysFont("Arial", 14)
+    font = pygame.font.SysFont("Arial", 18)
+    bg_color = (245, 245, 245)
 
-    # Calcular límites para transformar coordenadas cartesianas a pantalla
-    all_x = [v.x for v in dcel.vertices.values()]
-    all_y = [v.y for v in dcel.vertices.values()]
-    min_x, max_x = min(all_x) - 2, max(all_x) + 2
-    min_y, max_y = min(all_y) - 2, max(all_y) + 2
-    scale_x = WIDTH / (max_x - min_x)
-    scale_y = HEIGHT / (max_y - min_y)
-    scale = min(scale_x, scale_y) * 0.9
-    offset_x = (WIDTH - (max_x - min_x) * scale) / 2
-    offset_y = (HEIGHT - (max_y - min_y) * scale) / 2
+    fallback_colors = [(144, 238, 144, 180), (173, 216, 230, 180), (255, 182, 193, 180), 
+                       (255, 250, 205, 180), (221, 160, 221, 180), (240, 128, 128, 180)]
 
-    def cart_to_screen(cx, cy):
-        sx = offset_x + (cx - min_x) * scale
-        sy = HEIGHT - (offset_y + (cy - min_y) * scale) # Invertir Y
-        return int(sx), int(sy)
-
-    # Cargar imágenes
     images = []
     if os.path.exists(img_folder):
         for fname in sorted(os.listdir(img_folder)):
-            if fname.lower().endswith(('.png', '.jpg')):
+            if fname.lower().endswith(('.png', '.jpg', '.jpeg')):
                 img = pygame.image.load(os.path.join(img_folder, fname)).convert_alpha()
                 images.append(img)
 
+    def cart_to_screen_local(cx, cy):
+        sx = offset_x + (cx - min_x) * scale
+        sy = HEIGHT - (offset_y + (cy - min_y) * scale)
+        return int(sx), int(sy)
+
     running = True
     while running:
-        screen.fill((240, 240, 240)) # Fondo gris claro
+        screen.fill(bg_color) 
+
+        btn_view_rect = pygame.Rect(WIDTH - 260, HEIGHT - 45, 250, 35)
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.MOUSEBUTTONDOWN:
-                mx, my = event.pos
-                # Convertir pantalla a cartesiano
+                if event.button == 1: 
+                    if btn_view_rect.collidepoint(event.pos):
+                        open_matplotlib_technical_view(dcel)
+                        continue
+
+                    mx, my = event.pos
+                    cx = (mx - offset_x) / scale + min_x
+                    cy = (HEIGHT - my - offset_y) / scale + min_y
+                    
+                    best_face = None; min_area = float('inf')
+                    for fc in dcel.faces.values():
+                        if fc.id == "C1": continue
+                        poly = get_cycle_polygon(fc.outer_component)
+                        
+                        if point_in_polygon((cx, cy), poly):
+                            en_agujero = False
+                            for ic in fc.inner_components:
+                                if point_in_polygon((cx, cy), get_cycle_polygon(ic)):
+                                    en_agujero = True
+                                    break
+                                    
+                            if not en_agujero and fc.area < min_area:
+                                min_area = fc.area; best_face = fc
+                                
+                    if best_face:
+                        best_face.active = not best_face.active
+                        save_dcel_full(dcel)
+                        
+            elif event.type == pygame.MOUSEWHEEL:
+                mx, my = pygame.mouse.get_pos()
+                zoom_factor = 1.1 if event.y > 0 else 0.9
                 cx = (mx - offset_x) / scale + min_x
                 cy = (HEIGHT - my - offset_y) / scale + min_y
-                
-                best_face = None; min_area = float('inf')
-                for fc in dcel.faces.values():
-                    if fc.id == "C1": continue
-                    poly = get_face_polygon(fc)
-                    if point_in_polygon((cx, cy), poly):
-                        if fc.area < min_area:
-                            min_area = fc.area; best_face = fc
-                
-                if best_face:
-                    best_face.active = not best_face.active
-                    save_dcel(dcel)
+                scale *= zoom_factor
+                offset_x = mx - (cx - min_x) * scale
+                offset_y = HEIGHT - my - (cy - min_y) * scale
 
-        # Dibujar Caras Activas con Imagen (Clipping)
-        for fc in dcel.faces.values():
+        caras_ordenadas = sorted([f for f in dcel.faces.values() if f.id != "C1"], key=lambda x: x.area, reverse=True)
+
+        for fc in caras_ordenadas:
             if fc.active and fc.outer_component:
-                poly_cart = get_face_polygon(fc)
-                poly_scr = [cart_to_screen(p[0], p[1]) for p in poly_cart]
+                poly_cart = get_cycle_polygon(fc.outer_component)
+                poly_scr = [cart_to_screen_local(p[0], p[1]) for p in poly_cart]
                 
-                # Crear máscara de recorte
-                mask_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-                pygame.draw.polygon(mask_surface, (255, 255, 255, 255), poly_scr)
-                
-                # Cargar y escalar imagen
-                if images:
-                    img = images[int(fc.id[1:]) % len(images)]
-                    bx = [p[0] for p in poly_scr]; by = [p[1] for p in poly_scr]
-                    min_bx, max_bx = min(bx), max(bx); min_by, max_by = min(by), max(by)
-                    w = max_bx - min_bx; h = max_by - min_by
-                    if w > 0 and h > 0:
-                        scaled_img = pygame.transform.scale(img, (w, h))
-                        img_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-                        img_surface.blit(scaled_img, (min_bx, min_by))
+                if len(poly_scr) > 2:
+                    if images:
+                        img = images[int(fc.id[1:]) % len(images)]
+                        mask_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+                        pygame.draw.polygon(mask_surface, (255, 255, 255, 255), poly_scr)
                         
-                        # Aplicar máscara
-                        img_surface.blit(mask_surface, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
-                        screen.blit(img_surface, (0, 0))
-                else:
-                    # Si no hay imágenes, rellenar de verde
-                    pygame.draw.polygon(screen, (144, 238, 144, 150), poly_scr)
+                        for ic in fc.inner_components:
+                            h_scr = [cart_to_screen_local(p[0], p[1]) for p in get_cycle_polygon(ic)]
+                            if len(h_scr) > 2:
+                                hole_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+                                pygame.draw.polygon(hole_surf, (255, 255, 255, 255), h_scr)
+                                mask_surface.blit(hole_surf, (0, 0), special_flags=pygame.BLEND_RGBA_SUB)
+                        
+                        bx = [p[0] for p in poly_scr]; by = [p[1] for p in poly_scr]
+                        min_bx, max_bx = min(bx), max(bx); min_by, max_by = min(by), max(by)
+                        w = max_bx - min_bx; h = max_by - min_by
+                        
+                        if w > 0 and h > 0:
+                            scaled_img = pygame.transform.scale(img, (w, h))
+                            img_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+                            img_surface.blit(scaled_img, (min_bx, min_by))
+                            img_surface.blit(mask_surface, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+                            screen.blit(img_surface, (0, 0))
+                    else:
+                        color = fallback_colors[int(fc.id[1:]) % len(fallback_colors)]
+                        color_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+                        pygame.draw.polygon(color_surface, color, poly_scr)
+                        
+                        for ic in fc.inner_components:
+                            h_scr = [cart_to_screen_local(p[0], p[1]) for p in get_cycle_polygon(ic)]
+                            if len(h_scr) > 2:
+                                hole_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+                                pygame.draw.polygon(hole_surf, (255, 255, 255, 255), h_scr)
+                                color_surface.blit(hole_surf, (0, 0), special_flags=pygame.BLEND_RGBA_SUB)
+                                
+                        screen.blit(color_surface, (0, 0))
 
-        # Dibujar Aristas
+                    pygame.draw.polygon(screen, (0, 100, 0), poly_scr, 2)
+                    for ic in fc.inner_components:
+                        h_scr = [cart_to_screen_local(p[0], p[1]) for p in get_cycle_polygon(ic)]
+                        if len(h_scr) > 2: pygame.draw.polygon(screen, (0, 100, 0), h_scr, 2)
+
+        drawn_edges = set()
         for e in dcel.edges.values():
-            if int(e.id[1:]) < int(e.twin.id[1:]):
-                p1 = cart_to_screen(e.origin.x, e.origin.y)
-                p2 = cart_to_screen(e.twin.origin.x, e.twin.origin.y)
-                pygame.draw.line(screen, (0, 0, 0), p1, p2, 2)
+            if e.physical_id not in drawn_edges:
+                p1 = cart_to_screen_local(e.origin.x, e.origin.y)
+                p2 = cart_to_screen_local(e.twin.origin.x, e.twin.origin.y)
+                pygame.draw.line(screen, (40, 40, 40), p1, p2, 2)
+                drawn_edges.add(e.physical_id)
+                
+        screen.blit(font.render("Fase 3: Mapa Interactivo (Zoom: Rueda | Click: Seleccionar)", True, (0, 0, 0)), (10, 10))
 
-        # Dibujar Vértices y Etiquetas
-        for v in dcel.vertices.values():
-            pos = cart_to_screen(v.x, v.y)
-            pygame.draw.circle(screen, (200, 0, 0), pos, 4)
-            label = font.render(v.id, True, (0, 0, 150))
-            screen.blit(label, (pos[0] + 5, pos[1] - 10))
+        pygame.draw.rect(screen, (33, 150, 243), btn_view_rect, border_radius=6)
+        pygame.draw.rect(screen, (13, 71, 161), btn_view_rect, width=2, border_radius=6)
+        btn_text = font.render("Abrir Vista Tecnica (Matplotlib)", True, (255, 255, 255))
+        screen.blit(btn_text, (btn_view_rect.x + 12, btn_view_rect.y + 6))
 
         pygame.display.flip()
         clock.tick(30)
-
     pygame.quit()
 
-# ========================================================
-# EJECUCIÓN PRINCIPAL
-# ========================================================
 if __name__ == "__main__":
     folder = input("Introduce el nombre de la carpeta donde están los layers: ")
     if not os.path.exists(folder):
@@ -405,20 +660,35 @@ if __name__ == "__main__":
     if len(layers_prefixes) < 1:
         print("No se encontraron archivos .vertices en la carpeta."); exit()
 
-    print(f"Capas encontradas: {layers_prefixes}")
-    original_dcles = []; all_segments = []
+    all_segments = []
     for prefix in layers_prefixes:
-        print(f"Cargando capa: {prefix}...")
         dcel_orig = parse_layer_files(folder, prefix)
-        original_dcles.append(dcel_orig)
         all_segments.extend(extract_segments(dcel_orig))
 
-    print(f"Total de segmentos a fusionar: {len(all_segments)}")
-    print("Ejecutando Map Overlay...")
-    overlay_dcel = build_overlay_dcel(all_segments)
-    inherit_attributes(overlay_dcel, original_dcles)
-    save_dcel(overlay_dcel)
-    print("¡Fusión completada! Archivos generados. Abriendo Pygame...")
+    all_x = [p[0] for s in all_segments for p in s]
+    all_y = [p[1] for s in all_segments for p in s]
+    min_x, max_x = min(all_x), max(all_x)
+    min_y, max_y = min(all_y), max(all_y)
+    dx = max_x - min_x; dy = max_y - min_y
+    margin = max(dx, dy) * 0.2 if max(dx, dy) > 0 else 10
+    bx1, bx2 = min_x - margin, max_x + margin
+    by1, by2 = min_y - margin, max_y + margin
 
-    if not os.path.exists("imagenes"): os.makedirs("imagenes")
-    pygame_interactive(overlay_dcel)
+    bb_segments = [
+        ((bx1, by1), (bx2, by1)),
+        ((bx2, by1), (bx2, by2)),
+        ((bx2, by2), (bx1, by2)),
+        ((bx1, by2), (bx1, by1))
+    ]
+    all_segments.extend(bb_segments)
+
+    pygame.init()
+    screen = pygame.display.set_mode((800, 600))
+    pygame.display.set_caption("Map Overlay Animations")
+    params = setup_pygame_view(all_segments, width=800, height=600)
+
+    inters = animated_sweep_line(all_segments, screen, params)
+    overlay_dcel = build_and_animate_dcel(all_segments, inters, screen, params)
+    
+    save_dcel_full(overlay_dcel, prefix="overlay_result")
+    pygame_interactive(overlay_dcel, params)

@@ -1,9 +1,24 @@
-Nombre   Interno              Externo   
-########################################
-C1       [e16,e51]            None      
-C2       None                 e0        
-C3       None                 e1        
-C4       None                 e3        
-C5       None                 e4        
-C6       None                 e27       
-C7       None                 e50       
+#######################
+Nombre  Interno        Externo
+#######################
+C1      [e94]          None
+C2      None           e0
+C3      None           e2
+C4      None           e4
+C5      None           e5
+C6      None           e6
+C7      None           e7
+C8      None           e8
+C9      [e63]          e9
+C10     None           e12
+C11     None           e13
+C12     None           e14
+C13     None           e18
+C14     None           e20
+C15     None           e21
+C16     None           e26
+C17     None           e27
+C18     None           e34
+C19     None           e44
+C20     None           e62
+C21     [e1]           e95

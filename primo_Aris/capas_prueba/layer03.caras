@@ -1,0 +1,10 @@
+Archivo de caras
+#######################
+Nombre	Interno		Externo
+#######################
+CARA1	[e1,e9,e17,e25,e31]	None
+CARA2	None		e0
+CARA3	None		e8
+CARA4	None		e16
+CARA5	None		e24
+CARA6	None		e30
