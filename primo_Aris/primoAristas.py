@@ -4,6 +4,7 @@ import heapq
 import pygame
 import matplotlib.pyplot as plt
 
+# Tolerancia geométrica
 EPS = 1e-5
 
 # ========================================================
@@ -19,7 +20,7 @@ class Vertex:
 class HalfEdge:
     def __init__(self, eid):
         self.id = eid
-        self.physical_id = None  # ID único visual y de archivo (Ej. e1)
+        self.physical_id = None  # ID único de la arista física (Ej. e1)
         self.origin = None
         self.twin = None
         self.next = None
@@ -70,7 +71,7 @@ class DCEL:
         return f
 
 # ========================================================
-# LECTURA DE ARCHIVOS
+# LECTURA DE ARCHIVOS DE CAPAS
 # ========================================================
 def parse_layer_files(folder_path, prefix):
     dcel = DCEL(); dcel.f_counter = 1
@@ -118,7 +119,15 @@ def parse_layer_files(folder_path, prefix):
                     while True:
                         curr.face = f_obj; curr = curr.next
                         if curr == f_obj.outer_component: break
-
+                        
+    a_file = os.path.join(folder_path, f"{prefix}.activos")
+    if os.path.exists(a_file):
+        with open(a_file, 'r') as f:
+            for line in f:
+                if line.startswith('#') or not line.strip() or "Caras" in line: continue
+                active_id = line.strip()
+                if active_id in dcel.faces: dcel.faces[active_id].active = True
+                
     return dcel
 
 def extract_segments(dcel):
@@ -134,52 +143,82 @@ def cross(o, a, b):
     return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
 
 def intersect(seg1, seg2):
-    p1, p2 = seg1; p3, p4 = seg2
-    d1, d2 = cross(p3, p4, p1), cross(p3, p4, p2)
-    d3, d4 = cross(p1, p2, p3), cross(p1, p2, p4)
-    if ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and ((d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0)):
-        t = d1 / (d1 - d2)
-        return (p1[0] + t*(p2[0]-p1[0]), p1[1] + t*(p2[1]-p1[1]))
+    (x1, y1), (x2, y2) = seg1
+    (x3, y3), (x4, y4) = seg2
+    
+    denom = (y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1)
+    if abs(denom) < 1e-9:
+        return None  
+        
+    ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / denom
+    ub = ((x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)) / denom
+    
+    if -1e-4 <= ua <= 1.0001 and -1e-4 <= ub <= 1.0001:
+        x = x1 + ua * (x2 - x1)
+        y = y1 + ua * (y2 - y1)
+        return (x, y)
+        
     return None
 
 # ========================================================
 # GUARDADO DE ARCHIVOS DCEL RESULTANTE
 # ========================================================
 def save_dcel_full(dcel, prefix="overlay_result"):
-    with open(f"{prefix}.vertices", "w") as f:
+    # 1. Construir mapeo relacional explícito pfX y ppfX
+    edge_to_id = {}
+    counter = 1
+    for e_id, e in dcel.edges.items():
+        if e_id not in edge_to_id:
+            edge_to_id[e_id] = f"pf{counter}"
+            if e.twin:
+                edge_to_id[e.twin.id] = f"ppf{counter}"
+            counter += 1
+
+    def ordenar_key(item):
+        id_str = edge_to_id.get(item[0], "pf0")
+        num = int(''.join(filter(str.isdigit, id_str)))
+        prioridad = 0 if id_str.startswith("pf") else 1
+        return (num, prioridad)
+
+    # GUARDAR VÉRTICES
+    with open(f"{prefix}.vertices", "w", encoding="utf-8") as f:
         f.write("#################################\n")
         f.write(f"{'Nombre':<8}{'x':<8}{'y':<8}{'Incidente'}\n")
         f.write("#################################\n")
         for v in dcel.vertices.values():
-            inc = v.incident_edge.id if v.incident_edge else "None"
+            inc = edge_to_id.get(v.incident_edge.id, "None") if v.incident_edge else "None"
             f.write(f"{v.id:<8}{v.x:<8g}{v.y:<8g}{inc}\n")
             
-    with open(f"{prefix}.aristas", "w") as f:
+    # GUARDAR ARISTAS
+    with open(f"{prefix}.aristas", "w", encoding="utf-8") as f:
         f.write("#############################################\n")
         f.write(f"{'Nombre':<8}{'Origen':<8}{'Pareja':<8}{'Cara':<8}{'Sigue':<8}{'Antes'}\n")
         f.write("#############################################\n")
         
-        # AQUÍ ESTÁ LA CORRECCIÓN: 
-        # Se listan TODAS las medias-aristas (Half-Edges) como lo dicta el algoritmo Primo-Primo.
-        # Cada arista apunta a su Pareja (Twin) real, y muestra la Cara que delimita.
-        for e in dcel.edges.values():
-            twin_id = e.twin.id if e.twin else "None"
+        for e_id, e in sorted(dcel.edges.items(), key=ordenar_key):
+            id_actual = edge_to_id.get(e.id, "None")
+            twin_id = edge_to_id.get(e.twin.id, "None") if e.twin else "None"
             face_id = e.face.id if e.face else "None"
-            nxt_id = e.next.id if e.next else "None"
-            prv_id = e.prev.id if e.prev else "None"
+            nxt_id = edge_to_id.get(e.next.id, "None") if e.next else "None"
+            prv_id = edge_to_id.get(e.prev.id, "None") if e.prev else "None"
             
-            f.write(f"{e.id:<8}{e.origin.id:<8}{twin_id:<8}{face_id:<8}{nxt_id:<8}{prv_id}\n")
+            f.write(f"{id_actual:<8}{e.origin.id:<8}{twin_id:<8}{face_id:<8}{nxt_id:<8}{prv_id}\n")
             
-    with open(f"{prefix}.caras", "w") as f:
+    # GUARDAR CARAS
+    with open(f"{prefix}.caras", "w", encoding="utf-8") as f:
         f.write("#######################\n")
         f.write(f"{'Nombre':<8}{'Interno':<15}{'Externo'}\n")
         f.write("#######################\n")
         for fc in dcel.faces.values():
-            outer = fc.outer_component.id if fc.outer_component else "None"
-            inner = "[" + ",".join([ic.id for ic in fc.inner_components]) + "]" if fc.inner_components else "None"
+            outer = edge_to_id.get(fc.outer_component.id, "None") if fc.outer_component else "None"
+            inner = "None"
+            if fc.inner_components:
+                inner_mapped = [edge_to_id.get(ic.id, "None") for ic in fc.inner_components]
+                inner = "[" + ",".join(inner_mapped) + "]"
             f.write(f"{fc.id:<8}{inner:<15}{outer}\n")
             
-    with open(f"{prefix}.activos", "w") as f:
+    # GUARDAR ACTIVOS
+    with open(f"{prefix}.activos", "w", encoding="utf-8") as f:
         f.write("#######################\n")
         f.write("Caras Activas\n")
         f.write("#######################\n")
@@ -188,7 +227,101 @@ def save_dcel_full(dcel, prefix="overlay_result"):
                 f.write(f"{fc.id}\n")
 
 # ========================================================
-# UI Y UTILIDADES DE DIBUJO
+# VISTA TÉCNICA MATPLOTLIB (100% SINCRONIZADA CON EL ARCHIVO)
+# ========================================================
+def open_matplotlib_technical_view(dcel):
+    fig, ax = plt.subplots(figsize=(9, 7))
+    fig.canvas.manager.set_window_title('Map Overlay - Vista Técnica de Ciclos')
+    
+    # Re-generamos exactamente el mismo mapeo relacional pf/ppf para que calce perfecto con el .aristas
+    edge_to_id = {}
+    counter = 1
+    for e_id, e in dcel.edges.items():
+        if e_id not in edge_to_id:
+            edge_to_id[e_id] = f"pf{counter}"
+            if e.twin:
+                edge_to_id[e.twin.id] = f"ppf{counter}"
+            counter += 1
+
+    drawn_physical_edges = set()
+    
+    for e in dcel.edges.values():
+        p1 = (e.origin.x, e.origin.y)
+        p2 = (e.twin.origin.x, e.twin.origin.y)
+        
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        length = math.hypot(dx, dy)
+        
+        # Dibujamos el esqueleto de la red física atenuado de fondo
+        if e.physical_id not in drawn_physical_edges:
+            ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color='gray', linewidth=4, alpha=0.15, zorder=1)
+            drawn_physical_edges.add(e.physical_id)
+
+        if length > 0:
+            # Vector normal para desplazar lateralmente las medias-aristas gemelas
+            nx = -dy / length
+            ny = dx / length
+            offset = -0.10  # Espacio para que las flechas de ida y vuelta no colisionen
+            
+            p1_off = (p1[0] + nx * offset, p1[1] + ny * offset)
+            p2_off = (p2[0] + nx * offset, p2[1] + ny * offset)
+            
+            # Encogemos levemente los extremos para no tapar los círculos de los vértices
+            shrink = 0.18 
+            p1_draw = (p1_off[0] + dx * shrink, p1_off[1] + dy * shrink)
+            p2_draw = (p2_off[0] - dx * shrink, p2_off[1] - dy * shrink)
+            
+            # El punto medio de nuestra flecha desplazada, ideal para clavar la etiqueta texto
+            mx = (p1_draw[0] + p2_draw[0]) / 2
+            my = (p1_draw[1] + p2_draw[1]) / 2
+        else:
+            p1_draw, p2_draw = p1, p2
+            mx, my = p1[0], p1[1]
+
+        # Extraemos el ID natural que calcula el archivo de texto
+        lbl = edge_to_id.get(e.id, "None")
+        
+        # Código de color didáctico para tu exposición
+        # Azules para el sentido directo (pf) y Púrpuras para el reverso (ppf)
+        color_flecha = 'royalblue' if lbl.startswith('pf') else 'darkorchid'
+        color_texto = 'darkblue' if lbl.startswith('pf') else 'purple'
+
+        # Dibujamos el vector de la media arista (direccional)
+        ax.annotate("", xy=p2_draw, xytext=p1_draw,
+                    arrowprops=dict(arrowstyle="-|>", color=color_flecha, lw=1.4, mutation_scale=10), zorder=2)
+        
+        # Colocamos la etiqueta exacta alineada a su respectiva flecha
+        ax.text(mx, my, lbl, color=color_texto, fontsize=8, fontweight='bold',
+                ha='center', va='center', 
+                bbox=dict(facecolor='white', alpha=0.85, edgecolor='none', pad=1), zorder=4)
+
+    # Dibujamos y etiquetamos los vértices
+    for v in dcel.vertices.values():
+        ax.plot(v.x, v.y, marker='o', markersize=6, color='crimson', zorder=3)
+        ax.annotate(f" {v.id}", (v.x, v.y), color='darkred', fontsize=9, fontweight='bold', zorder=5)
+
+    # Dibujamos las etiquetas del centro de las caras descubiertas
+    for fc in dcel.faces.values():
+        if fc.id != "C1" and fc.outer_component:
+            poly = get_cycle_polygon(fc.outer_component)
+            if poly:
+                cx = sum(p[0] for p in poly) / len(poly)
+                cy = sum(p[1] for p in poly) / len(poly)
+                ax.text(cx, cy, fc.id, color='forestgreen', fontsize=11, fontweight='bold', 
+                        ha='center', va='center', bbox=dict(facecolor='#E8F5E9', alpha=0.7, edgecolor='forestgreen', boxstyle='round,pad=0.2'))
+
+    ax.set_aspect('equal', adjustable='datalim')
+    plt.title("Vista Técnica Sincronizada: Medias-Aristas Primarias (pf=Azul) y Primo-Primas (ppf=Púrpura)", fontsize=11, pad=12, fontweight='bold')
+    plt.xlabel("Coordenada Eje X")
+    plt.ylabel("Coordenada Eje Y")
+    plt.grid(True, linestyle='--', alpha=0.4)
+    
+    plt.savefig("vista_tecnica_sincronizada.png", dpi=300, bbox_inches='tight')
+    plt.show()  
+
+# ========================================================
+# UI Y UTILIDADES DE DIBUJO (PYGAME ANIMACIÓN)
 # ========================================================
 def draw_skip_button(screen, font):
     btn_rect = pygame.Rect(screen.get_width() - 160, 10, 150, 30)
@@ -211,78 +344,7 @@ def cart_to_screen(cx, cy, min_x, min_y, scale, off_x, off_y, height):
     return int(off_x + (cx - min_x) * scale), int(height - (off_y + (cy - min_y) * scale))
 
 # ========================================================
-# VISTA TÉCNICA MATPLOTLIB (ARISTA DIFUMINADA Y CICLOS SIN ID)
-# ========================================================
-def open_matplotlib_technical_view(dcel):
-    fig, ax = plt.subplots(figsize=(8, 6))
-    fig.canvas.manager.set_window_title('Map Overlay - Vista Técnica de Ciclos')
-    
-    drawn_physical_edges = set()
-    
-    for e in dcel.edges.values():
-        p1 = (e.origin.x, e.origin.y)
-        p2 = (e.twin.origin.x, e.twin.origin.y)
-        
-        dx = p2[0] - p1[0]
-        dy = p2[1] - p1[1]
-        length = math.hypot(dx, dy)
-        
-        # 1. Dibujar la ARISTA FÍSICA difuminada (una sola vez por línea)
-        if e.physical_id not in drawn_physical_edges:
-            ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color='gray', linewidth=5, alpha=0.3, zorder=1)
-            
-            # Etiqueta ÚNICA de la arista en el centro de la línea
-            mx, my = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
-            ax.text(mx, my, e.physical_id, color='black', fontsize=9, fontweight='bold',
-                    ha='center', va='center', bbox=dict(facecolor='white', alpha=0.6, edgecolor='none', pad=1), zorder=4)
-            
-            drawn_physical_edges.add(e.physical_id)
-
-        # 2. Dibujar las FLECHAS direccionales del ciclo SIN ID
-        if length > 0:
-            nx = -dy / length
-            ny = dx / length
-            offset = 0.08  # Separación para las flechas
-            
-            p1_off = (p1[0] + nx * offset, p1[1] + ny * offset)
-            p2_off = (p2[0] + nx * offset, p2[1] + ny * offset)
-            
-            shrink = 0.15 
-            p1_draw = (p1_off[0] + dx * shrink, p1_off[1] + dy * shrink)
-            p2_draw = (p2_off[0] - dx * shrink, p2_off[1] - dy * shrink)
-        else:
-            p1_draw, p2_draw = p1, p2
-
-        # Flecha indicadora (sin colocar texto)
-        ax.annotate("", xy=p2_draw, xytext=p1_draw,
-                    arrowprops=dict(arrowstyle="-|>", color='royalblue', lw=1.2), zorder=2)
-
-    # Dibujar Vértices
-    for v in dcel.vertices.values():
-        ax.plot(v.x, v.y, marker='o', markersize=5, color='crimson', zorder=3)
-        ax.annotate(f" {v.id}", (v.x, v.y), color='darkred', fontsize=8, fontweight='bold', zorder=4)
-
-    # Dibujar Caras
-    """
-    for fc in dcel.faces.values():
-        if fc.id != "C1" and fc.outer_component:
-            poly = get_cycle_polygon(fc.outer_component)
-            if poly:
-                cx = sum(p[0] for p in poly) / len(poly)
-                cy = sum(p[1] for p in poly) / len(poly)
-                ax.text(cx, cy, fc.id, color='forestgreen', fontsize=10, fontweight='bold', ha='center', va='center')
-    """
-    ax.set_aspect('equal', adjustable='datalim')
-    plt.title("Vista Técnica: Aristas difuminadas (1 ID) y Ciclos separados", fontsize=11, pad=12, fontweight='bold')
-    plt.xlabel("Eje X")
-    plt.ylabel("Eje Y")
-    plt.grid(True, linestyle='--', alpha=0.5)
-    
-    plt.savefig("vista_tecnica_dcel.png", dpi=300, bbox_inches='tight')
-    plt.show()  
-
-# ========================================================
-# ANIMACIONES Y SWEEP-LINE
+# ALGORITMOS DE CONSTRUCCIÓN Y SWEEP LINE
 # ========================================================
 def animated_sweep_line(segments, screen, params):
     min_x, max_x, min_y, max_y, scale, off_x, off_y = params
@@ -348,7 +410,7 @@ def animated_sweep_line(segments, screen, params):
         sl_x = cart_to_screen(current_x, 0, min_x, min_y, scale, off_x, off_y, height)[0]
         pygame.draw.line(screen, (255, 255, 0), (sl_x, 0), (sl_x, height), 2)
         
-        screen.blit(font.render(f"Fase 1: Sweep-Line Intersecciones ({len(intersections)})", True, (255, 255, 255)), (10, 10))
+        screen.blit(font.render(f"Fase de Map Overlay ({len(intersections)} Intersecciones)", True, (255, 255, 255)), (10, 10))
         btn_rect = draw_skip_button(screen, font)
         
         pygame.display.flip()
@@ -357,41 +419,60 @@ def animated_sweep_line(segments, screen, params):
     if not skip_anim: pygame.time.delay(500)
     return list(found_intersections)
 
-def build_and_animate_dcel(segments, inters, screen, params):
-    min_x, max_x, min_y, max_y, scale, off_x, off_y = params
-    height = screen.get_height()
-    clock = pygame.time.Clock()
-    font = pygame.font.SysFont("Arial", 18)
-    
+def build_and_animate_dcel(segments, inters, screen=None, params=None, skip_all_anim=False):
     unique_segments = []
     seen = set()
     for s in segments:
         p1, p2 = s
         key = tuple(sorted([(round(p1[0],4), round(p1[1],4)), (round(p2[0],4), round(p2[1],4))]))
         if key not in seen:
-            seen.add(key); unique_segments.append(s)
+            seen.add(key)
+            unique_segments.append(s)
             
-    seg_points = {i: [s[0], s[1]] for i, s in enumerate(unique_segments)}
+    seg_points = {i: [] for i in range(len(unique_segments))}
+    
+    for i, seg in enumerate(unique_segments):
+        p, q = seg
+        seg_points[i].append((p, 0.0))
+        seg_points[i].append((q, 1.0))
+
     for ix, iy in inters:
         for i, seg in enumerate(unique_segments):
             p, q = seg
-            d1 = math.hypot(ix-p[0], iy-p[1]); d2 = math.hypot(ix-q[0], iy-q[1])
-            d3 = math.hypot(p[0]-q[0], p[1]-q[1])
-            if d1 + d2 < d3 + EPS: seg_points[i].append((ix, iy))
-
-    for i in seg_points:
-        pts = seg_points[i]
-        if len(pts) > 2:
-            p0 = unique_segments[i][0]
-            pts.sort(key=lambda p: math.hypot(p[0]-p0[0], p[1]-p0[1]))
+            dx = q[0] - p[0]
+            dy = q[1] - p[1]
+            sq_len = dx*dx + dy*dy
+            
+            if sq_len < 1e-10: continue
+            
+            t = ((ix - p[0]) * dx + (iy - p[1]) * dy) / sq_len
+            
+            if -1e-4 <= t <= 1.0001:
+                px, py = p[0] + t*dx, p[1] + t*dy
+                dist_sq = (ix - px)**2 + (iy - py)**2
+                
+                if dist_sq < 1e-6:
+                    seg_points[i].append(((ix, iy), t))
 
     dcel = DCEL()
     edge_seen = set()
     
-    for i, pts in seg_points.items():
-        for j in range(len(pts)-1):
-            v1 = dcel.add_vertex(pts[j][0], pts[j][1])
-            v2 = dcel.add_vertex(pts[j+1][0], pts[j+1][1])
+    for i, pts_t in seg_points.items():
+        pts_t.sort(key=lambda item: item[1])
+        
+        clean_pts = []
+        for pt, t in pts_t:
+            if not clean_pts:
+                clean_pts.append(pt)
+            else:
+                last_pt = clean_pts[-1]
+                if math.hypot(pt[0]-last_pt[0], pt[1]-last_pt[1]) > 1e-4:
+                    clean_pts.append(pt)
+                    
+        for j in range(len(clean_pts)-1):
+            v1 = dcel.add_vertex(clean_pts[j][0], clean_pts[j][1])
+            v2 = dcel.add_vertex(clean_pts[j+1][0], clean_pts[j+1][1])
+            
             if v1.id != v2.id:
                 k1 = (v1.id, v2.id); k2 = (v2.id, v1.id)
                 if k1 not in edge_seen and k2 not in edge_seen:
@@ -399,18 +480,23 @@ def build_and_animate_dcel(segments, inters, screen, params):
                     edge_seen.add(k1); edge_seen.add(k2)
 
     adj = {v.id: [] for v in dcel.vertices.values()}
-    for e in dcel.edges.values(): adj[e.origin.id].append(e)
+    for e in dcel.edges.values(): 
+        adj[e.origin.id].append(e)
 
     for v_id, edges in adj.items():
         edges.sort(key=lambda e: math.atan2(e.twin.origin.y - e.origin.y, e.twin.origin.x - e.origin.x))
         for i in range(len(edges)):
-            e_curr = edges[i]; e_prev = edges[(i-1) % len(edges)].twin
-            e_curr.prev = e_prev; e_prev.next = e_curr
+            e_curr = edges[i]
+            e_prev = edges[(i-1) % len(edges)].twin
+            e_curr.prev = e_prev
+            e_prev.next = e_curr
 
     visited = set()
     unbounded = dcel.add_face(is_unbounded=True)
     holes = []
-    skip_anim = False
+    
+    skip_anim = skip_all_anim
+    if screen: font = pygame.font.SysFont("Arial", 18)
     
     for e in dcel.edges.values():
         if e in visited: continue
@@ -418,10 +504,15 @@ def build_and_animate_dcel(segments, inters, screen, params):
         while curr not in visited:
             visited.add(curr); cycle_edges.append(curr); curr = curr.next
             
-            if skip_anim: continue
+            if skip_anim or not screen or not params: continue
+            
+            min_x, max_x, min_y, max_y, scale, off_x, off_y = params
+            height = screen.get_height()
+            
             for event in pygame.event.get():
                 if event.type == pygame.QUIT: pygame.quit(); exit()
                 if event.type == pygame.MOUSEBUTTONDOWN:
+                    btn_rect = pygame.Rect(screen.get_width() - 160, 10, 150, 30)
                     if btn_rect.collidepoint(event.pos): skip_anim = True
             
             screen.fill((30, 30, 30))
@@ -432,17 +523,19 @@ def build_and_animate_dcel(segments, inters, screen, params):
                 width = 3 if de in cycle_edges else 1
                 pygame.draw.line(screen, color, p1, p2, width)
             
-            screen.blit(font.render("Fase 2: Extrayendo Caras y Agujeros", True, (255, 255, 255)), (10, 10))
-            btn_rect = draw_skip_button(screen, font)
+            screen.blit(font.render("Extrayendo Caras y Agujeros...", True, (255, 255, 255)), (10, 10))
+            draw_skip_button(screen, font)
             pygame.display.flip()
-            clock.tick(30)
+            pygame.time.Clock().tick(30)
             
         area = 0.0
         for ce in cycle_edges: area += (ce.origin.x * ce.twin.origin.y - ce.twin.origin.x * ce.origin.y)
         area /= 2.0
         
         if area < -EPS:
-            f = dcel.add_face(); f.outer_component = cycle_edges[0]; f.area = abs(area)
+            f = dcel.add_face()
+            f.outer_component = cycle_edges[0]
+            f.area = abs(area)
             for ce in cycle_edges: ce.face = f
         elif area > EPS:
             holes.append((cycle_edges, area))
@@ -471,21 +564,36 @@ def build_and_animate_dcel(segments, inters, screen, params):
         for ce in hole_edges: ce.face = containing_face
         containing_face.inner_components.append(hole_edges[0])
             
-    # REASIGNAR IDs FÍSICOS CONSECUTIVOS SIN SALTOS (e1, e2, e3...)
     c = 1
     assigned = set()
     for e in dcel.edges.values():
         if e.id not in assigned:
             pid = f"e{c}"
             e.physical_id = pid
-            e.twin.physical_id = pid
+            if e.twin: e.twin.physical_id = pid
             assigned.add(e.id)
-            assigned.add(e.twin.id)
+            if e.twin: assigned.add(e.twin.id)
             c += 1
 
-    if not skip_anim: pygame.time.delay(500)
+    if not skip_anim and screen: pygame.time.delay(500)
     return dcel
 
+def inherit_attributes(new_dcel, original_dcels):
+    for f in new_dcel.faces.values():
+        if f.id == "C1" or not f.outer_component: continue
+        poly = get_cycle_polygon(f.outer_component)
+        if not poly: continue
+        cx = sum(p[0] for p in poly) / len(poly); cy = sum(p[1] for p in poly) / len(poly)
+        
+        for orig_dcel in original_dcels:
+            for orig_f in orig_dcel.faces.values():
+                if orig_f.active and orig_f.outer_component:
+                    if point_in_polygon((cx, cy), get_cycle_polygon(orig_f.outer_component)):
+                        f.active = True; break
+
+# ========================================================
+# UTILIDADES MATEMÁTICAS
+# ========================================================
 def get_cycle_polygon(edge):
     if not edge: return []
     poly = []; start = edge; curr = start
@@ -638,7 +746,7 @@ def pygame_interactive(dcel, initial_params, img_folder="imagenes"):
                 pygame.draw.line(screen, (40, 40, 40), p1, p2, 2)
                 drawn_edges.add(e.physical_id)
                 
-        screen.blit(font.render("Fase 3: Mapa Interactivo (Zoom: Rueda | Click: Seleccionar)", True, (0, 0, 0)), (10, 10))
+        screen.blit(font.render("Mapa Interactivo (Zoom: Rueda | Click: Seleccionar)", True, (0, 0, 0)), (10, 10))
 
         pygame.draw.rect(screen, (33, 150, 243), btn_view_rect, border_radius=6)
         pygame.draw.rect(screen, (13, 71, 161), btn_view_rect, width=2, border_radius=6)
@@ -649,6 +757,9 @@ def pygame_interactive(dcel, initial_params, img_folder="imagenes"):
         clock.tick(30)
     pygame.quit()
 
+# ========================================================
+# EJECUCIÓN PRINCIPAL
+# ========================================================
 if __name__ == "__main__":
     folder = input("Introduce el nombre de la carpeta donde están los layers: ")
     if not os.path.exists(folder):
@@ -661,11 +772,30 @@ if __name__ == "__main__":
     if len(layers_prefixes) < 1:
         print("No se encontraron archivos .vertices en la carpeta."); exit()
 
+    original_dcels = []
     all_segments = []
+    
+    print("\n--- INICIANDO SANITIZACIÓN DE CAPAS ---")
     for prefix in layers_prefixes:
-        dcel_orig = parse_layer_files(folder, prefix)
-        all_segments.extend(extract_segments(dcel_orig))
+        print(f"Limpiando y arreglando intersecciones internas en: {prefix}...")
+        
+        dcel_raw = parse_layer_files(folder, prefix)
+        raw_segments = extract_segments(dcel_raw)
+        
+        layer_inters = []
+        for i in range(len(raw_segments)):
+            for j in range(i+1, len(raw_segments)):
+                pt = intersect(raw_segments[i], raw_segments[j])
+                if pt: layer_inters.append((round(pt[0], 4), round(pt[1], 4)))
+        layer_inters = list(set(layer_inters))
+        
+        cleaned_dcel = build_and_animate_dcel(raw_segments, layer_inters, skip_all_anim=True)
+        inherit_attributes(cleaned_dcel, [dcel_raw])
+        
+        original_dcels.append(cleaned_dcel)
+        all_segments.extend(extract_segments(cleaned_dcel))
 
+    print("\n--- INICIANDO MAP OVERLAY FINAL ---")
     all_x = [p[0] for s in all_segments for p in s]
     all_y = [p[1] for s in all_segments for p in s]
     min_x, max_x = min(all_x), max(all_x)
@@ -691,5 +821,7 @@ if __name__ == "__main__":
     inters = animated_sweep_line(all_segments, screen, params)
     overlay_dcel = build_and_animate_dcel(all_segments, inters, screen, params)
     
+    inherit_attributes(overlay_dcel, original_dcels)
     save_dcel_full(overlay_dcel, prefix="overlay_result")
+    
     pygame_interactive(overlay_dcel, params)
